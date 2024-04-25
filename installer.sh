@@ -2,6 +2,7 @@
 
 if [ -z "${NON_INTERACTIVE}" ]; then
 # edit this:
+HEADLESS=
 DISK=/dev/vda
 USERNAME=user
 USER_FULL_NAME="Debian User"
@@ -278,6 +279,7 @@ else
     mount --make-rslave --rbind /sys ${target}/sys
     mount --make-rslave --rbind /dev ${target}/dev
     mount --make-rslave --rbind /run ${target}/run
+    mount --bind /etc/resolv.conf ${target}/etc/resolv.conf
 fi
 
 if grep -qs "${efi_partition} " /proc/mounts ; then
@@ -376,15 +378,20 @@ EOF
 fi
 
 notify install required packages on ${target}
-if [ -z "${NON_INTERACTIVE}" ]; then
-    chroot ${target}/ apt-get update -y
-fi
+
 cat <<EOF > ${target}/tmp/run1.sh
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
-apt-get install locales systemd systemd-boot dracut btrfs-progs tasksel network-manager cryptsetup sudo tpm2-tools tpm-udev -y
-bootctl install
+apt-get -y update
+apt-get -y upgrade
+apt-get install locales systemd systemd-boot systemd-timesyncd dracut btrfs-progs tasksel cryptsetup sudo tpm2-tools tpm-udev -y
 EOF
+if [ -z "${HEADLESS}" ]; then
+    echo "apt-get install network-manager -y" >> ${target}/tmp/run1.sh
+else
+    echo "apt-get install python3 systemd-resolved -y" >> ${target}/tmp/run1.sh
+fi
+echo "bootctl install" >> ${target}/tmp/run1.sh
 chroot ${target}/ sh /tmp/run1.sh
 
 notify checking for tpm
@@ -401,7 +408,7 @@ if grep -qs "/dev/tpm" /tmp/tpm-list.txt ; then
           systemd-cryptenroll --unlock-key-file=/${KEYFILE} --tpm2-device=auto ${swap_partition} --tpm2-pcrs=${TPM_PCRS}
       fi
 else
-    echo tpm not avaialble
+    echo tpm not available
 fi
 EOF
 chroot ${target}/ bash /tmp/run4.sh
@@ -412,43 +419,65 @@ cat <<EOF > ${target}/tmp/packages.txt
 dracut
 linux-image-amd64
 firmware-linux
-bluez-firmware
-dahdi-firmware-nonfree
-firmware-amd-graphics
 firmware-ath9k-htc
 firmware-atheros
 firmware-bnx2
 firmware-bnx2x
 firmware-brcm80211
 firmware-cavium
-firmware-intel-sound
 firmware-iwlwifi
 firmware-libertas
 firmware-misc-nonfree
-firmware-myricom
 firmware-netronome
 firmware-netxen
-firmware-qcom-media
-firmware-qcom-soc
-firmware-qlogic
 firmware-realtek
-firmware-samsung
-firmware-siano
 firmware-ti-connectivity
-firmware-tomu
 firmware-zd1211
-hdmi2usb-fx2-firmware
-midisport-firmware
-sigrok-firmware-fx2lafw
+wireless-regdb
 EOF
 cat <<EOF > ${target}/tmp/run2.sh
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
 xargs apt-get install -y < /tmp/packages.txt
+EOF
+
+if [ -z "${HEADLESS}" ]; then
+# Additional packages for non-server installs
+cat <<EOF >> ${target}/tmp/packages.txt
+bluez-firmware
+dahdi-firmware-nonfree
+firmware-amd-graphics
+firmware-intel-sound
+firmware-myricom
+firmware-qcom-media
+firmware-qcom-soc
+firmware-qlogic
+firmware-samsung
+firmware-siano
+firmware-tomu
+hdmi2usb-fx2-firmware
+midisport-firmware
+sigrok-firmware-fx2lafw
+EOF
+
+# On non-server installs NetworkManager is used instead of systemd-networkd
+cat <<EOF >> ${target}/tmp/run2.sh
 systemctl disable systemd-networkd.service  # seems to fight with NetworkManager
 systemctl disable systemd-networkd.socket
 systemctl disable systemd-networkd-wait-online.service
 EOF
+else
+cat <<EOF >> ${target}/tmp/run2.sh
+systemctl enable systemd-networkd.service systemd-networkd.socket systemd-resolved.service
+EOF
+cat <<EOF > ${target}/etc/systemd/network/lan0.network
+[Match]
+Name=$(ip -o -4 route show to default | awk '{print $5}')
+[Network]
+DHCP=yes
+EOF
+fi
+
 chroot ${target}/ bash /tmp/run2.sh
 
 if [ ! -z "${SSH_PUBLIC_KEY}" ]; then
@@ -464,10 +493,12 @@ if [ ! -z "${SSH_PUBLIC_KEY}" ]; then
         echo "${SSH_PUBLIC_KEY}" > ${target}/home/${USERNAME}/.ssh/authorized_keys
         chmod 600 ${target}/home/${USERNAME}/.ssh/authorized_keys
         chroot ${target}/ chown -R ${USERNAME} /home/${USERNAME}/.ssh
-
-        notify installing openssh-server
-        chroot ${target}/ apt-get install -y openssh-server
     fi
+fi
+
+if [ ! -z "${SSH_PUBLIC_KEY}" ] || [ ! -z "${HEADLESS}" ]; then
+    notify installing openssh-server
+    chroot ${target}/ apt-get install -y openssh-server
 fi
 
 if [ -z "${NON_INTERACTIVE}" ]; then
